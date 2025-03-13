@@ -5,3 +5,5 @@ scikit-learn==1.3.0
 joblib>=1.1.0
 matplotlib>=3.5.0
 gunicorn==20.1.0
+statsmodels
+xgboost
