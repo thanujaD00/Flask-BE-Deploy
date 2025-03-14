@@ -8,12 +8,24 @@ import numpy as np
 from utils.model_utils import ensemble_predict, load_seasonal_factors
 import joblib
 from utils.data_utils import analyze_seasonal_patterns, create_seasonality_plot
+import time
+from functools import lru_cache
 
+# Replace this code at the app initialization
 app = Flask(__name__)
 
-with open('models/coconut_price_model.pkl', 'rb') as file:
-    model_data = pickle.load(file)
+# Use joblib instead of pickle for better performance with ML models
+import joblib
 
+# Load model at startup - OUTSIDE of any route handlers
+try:
+    model_data = joblib.load('models/coconut_price_model.pkl')
+    print("Model loaded successfully!")
+except Exception as e:
+    print(f"Error loading model: {e}")
+    model_data = None
+
+@lru_cache(maxsize=128)
 def predict_future_price(yield_nuts, export_volume, domestic_consumption, inflation_rate, 
                          prediction_date, previous_prices=None):
     """
@@ -27,6 +39,9 @@ def predict_future_price(yield_nuts, export_volume, domestic_consumption, inflat
     - prediction_date: Date for prediction (string 'YYYY-MM-DD' or datetime)
     - previous_prices: Dictionary with previous 12 months of prices (optional)
     """
+    
+    # Convert dictionary to tuple for caching if needed
+    previous_prices_tuple = tuple(previous_prices.items()) if previous_prices else None
     
     # Convert prediction_date to datetime if string
     if isinstance(prediction_date, str):
@@ -88,6 +103,7 @@ def predict_future_price(yield_nuts, export_volume, domestic_consumption, inflat
     
 @app.route('/predict', methods=['POST'])
 def predict():
+    start_time = time.time()
     try:
         data = request.get_json()
         
@@ -153,6 +169,7 @@ def predict():
                 }), 400
 
         if all_predictions:
+            print(f"Prediction completed in {time.time() - start_time:.2f} seconds")
             return jsonify({
                 'status': 'success',
                 'year': prediction_year,
@@ -285,6 +302,13 @@ if __name__ == '__main__':
     os.makedirs('models', exist_ok=True)
     os.makedirs('data', exist_ok=True)
     
+    # Set up proper logging
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    
+    # Pre-load and warm up models
+    print("Initializing models...")
+    
     # Create example data file if it doesn't exist
     historical_data_path = 'data/processed_coconut_data.csv'
     if not os.path.exists(historical_data_path):
@@ -299,4 +323,5 @@ if __name__ == '__main__':
         
         print(f"Created sample historical data file at {historical_data_path}")
     
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Use threaded=True for better concurrency
+    app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
