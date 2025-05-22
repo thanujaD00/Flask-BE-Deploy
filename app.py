@@ -13,6 +13,68 @@ app = Flask(__name__)
 
 with open('models/coconut_price_model.pkl', 'rb') as file:
     model_data = pickle.load(file)
+    
+# Load all required models directly
+try:
+    agro_model = joblib.load('models/xgboost_model.pkl')
+    ts_model = joblib.load('models/best_time_series_model.pkl')
+    ensemble_model = joblib.load('models/weighted_ensemble_model.pkl')  # Linear regression ensemble
+    
+    print("All models loaded successfully")
+except Exception as e:
+    print(f"Error loading models: {e}")
+    agro_model = None
+    ts_model = None  
+    ensemble_model = None
+    
+
+def predict_coconut_yield(soil_data, weather_data, prediction_date):
+    """
+    Predict coconut yield using ensemble approach
+    """
+    if not all([agro_model, ts_model, ensemble_model]):
+        raise Exception("Models not loaded properly")
+    
+    try:
+        # Prepare agronomical features
+        agro_features = pd.DataFrame({
+            'Temperature (°C)': [weather_data['Temperature (°C)']],
+            'Humidity (%)': [weather_data['Humidity (%)']],
+            'Rainfall (mm)': [weather_data['Rainfall (mm)']],
+            'Plant Age (years)': [soil_data['age']],
+            'Soil Type': [soil_data['soil_type']]
+        })
+        
+        # Get agronomical prediction
+        agro_prediction = agro_model.predict(agro_features)[0]
+        
+        # For time series prediction, create features based on date
+        # This depends on your time series model structure
+        ts_features = pd.DataFrame({
+            'year': [prediction_date.year],
+            'month': [prediction_date.month],
+            'day': [prediction_date.day]
+        })
+        
+        # Get time series prediction
+        ts_prediction = ts_model.predict(ts_features)[0]
+        
+        # Combine predictions for ensemble (this uses the linear regression ensemble)
+        combined_features = np.array([[agro_prediction, ts_prediction]])
+        
+        # Get final ensemble prediction
+        final_prediction = ensemble_model.predict(combined_features)[0]
+        
+        return {
+            'agronomical_prediction': float(agro_prediction),
+            'time_series_prediction': float(ts_prediction),
+            'ensemble_prediction': float(final_prediction),
+            'prediction_date': prediction_date.strftime('%Y-%m-%d')
+        }
+        
+    except Exception as e:
+        raise Exception(f"Prediction error: {str(e)}")
+    
 
 def predict_future_price(yield_nuts, export_volume, domestic_consumption, inflation_rate, 
                          prediction_date, previous_prices=None):
@@ -86,6 +148,8 @@ def predict_future_price(yield_nuts, export_volume, domestic_consumption, inflat
     
     return float(prediction)
     
+
+
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
@@ -115,11 +179,8 @@ def predict():
                         'message': f'Invalid month: {month}'
                     }), 400
                 
-                # Extract soil and weather data
+                # Extract required data based on your original features
                 soil_data = {
-                    'sm_10': month_data.get('sm_10'),
-                    'sm_20': month_data.get('sm_20'),
-                    'sm_30': month_data.get('sm_30'),
                     'age': month_data.get('age'),
                     'soil_type': month_data.get('soil_type')
                 }
@@ -127,25 +188,33 @@ def predict():
                 weather_data = {
                     'Temperature (°C)': month_data.get('Temperature (°C)'),
                     'Humidity (%)': month_data.get('Humidity (%)'),
-                    'Rainfall (mm)': month_data.get('Rainfall (mm)'),
-                    'Weather Description': month_data.get('Weather Description', 'normal')
+                    'Rainfall (mm)': month_data.get('Rainfall (mm)')
                 }
 
-                # Validate input data
-                for key, value in {**soil_data, **weather_data}.items():
-                    if value is None:
+                # Validate required inputs
+                required_fields = {
+                    'age': soil_data['age'],
+                    'soil_type': soil_data['soil_type'],
+                    'Temperature (°C)': weather_data['Temperature (°C)'],
+                    'Humidity (%)': weather_data['Humidity (%)'],
+                    'Rainfall (mm)': weather_data['Rainfall (mm)']
+                }
+                
+                for field_name, field_value in required_fields.items():
+                    if field_value is None:
                         return jsonify({
                             'status': 'error',
-                            'message': f'Missing parameter for month {month}: {key}'
+                            'message': f'Missing parameter for month {month}: {field_name}'
                         }), 400
                 
                 # Create prediction date
                 prediction_date = pd.Timestamp(year=prediction_year, month=month, day=15)
                 
-                # Make prediction
-                prediction = ensemble_predict(soil_data, weather_data, prediction_date=prediction_date)
-                if prediction:
-                    all_predictions.append(prediction)
+                # Make prediction using ensemble approach
+                prediction = predict_coconut_yield(soil_data, weather_data, prediction_date)
+                prediction['month'] = month
+                all_predictions.append(prediction)
+                
             except Exception as e:
                 return jsonify({
                     'status': 'error',
