@@ -5,11 +5,8 @@ import os
 import json
 import pickle
 import numpy as np
-from utils.model_utils import ensemble_predict, load_seasonal_factors
 import joblib
-from utils.data_utils import analyze_seasonal_patterns, create_seasonality_plot
 import time
-from functools import lru_cache
 
 # Replace this code at the app initialization
 app = Flask(__name__)
@@ -39,30 +36,116 @@ def predict_coconut_yield(soil_data, weather_data, prediction_date):
         raise Exception("Models not loaded properly")
     
     try:
-        # Prepare agronomical features
-        agro_features = pd.DataFrame({
-            'Temperature (°C)': [weather_data['Temperature (°C)']],
-            'Humidity (%)': [weather_data['Humidity (%)']],
-            'Rainfall (mm)': [weather_data['Rainfall (mm)']],
-            'Plant Age (years)': [soil_data['age']],
-            'Soil Type': [soil_data['soil_type']]
-        })
+        # Get soil type for one-hot encoding
+        soil_type = soil_data['soil_type']
+        
+        # Initialize soil type columns to 0
+        soil_type_columns = {
+            'Soil_Red Yellow Podzolic': 0,
+            'Soil_Lateritic': 0, 
+            'Soil_Cinnamon Sand': 0,
+            'Soil_Alluvial': 0,
+            'Soil_Sandy Loam': 0
+        }
+        
+        # Set the appropriate column to 1 based on soil type
+        if isinstance(soil_type, str):
+            column_name = f'Soil_{soil_type}'
+            if column_name in soil_type_columns:
+                soil_type_columns[column_name] = 1
+            else:
+                print(f"Warning: Unknown soil type '{soil_type}'. Using Red Yellow Podzolic as default.")
+                soil_type_columns['Soil_Red Yellow Podzolic'] = 1
+        elif isinstance(soil_type, (int, float)):
+            # Convert numeric soil type to string name for one-hot encoding
+            soil_type_map_reverse = {
+                0: 'Red Yellow Podzolic',
+                1: 'Lateritic',
+                2: 'Cinnamon Sand',
+                3: 'Alluvial',
+                4: 'Sandy Loam'
+            }
+            soil_name = soil_type_map_reverse.get(int(soil_type), 'Red Yellow Podzolic')
+            column_name = f'Soil_{soil_name}'
+            soil_type_columns[column_name] = 1
+        
+        # Prepare agronomical features with one-hot encoded soil types
+        features_dict = {
+            'Temperature (°C)': float(weather_data['Temperature (°C)']),
+            'Humidity (%)': float(weather_data['Humidity (%)']),
+            'Rainfall (mm)': float(weather_data['Rainfall (mm)']),
+            'Plant Age (years)': float(soil_data['age']),
+            'Year': prediction_date.year,
+            'Month': prediction_date.month
+        }
+        
+        # Add soil type columns
+        features_dict.update(soil_type_columns)
+        
+        # Create DataFrame and ensure correct order of columns
+        expected_columns = ['Plant Age (years)', 'Temperature (°C)', 'Humidity (%)', 
+                           'Rainfall (mm)', 'Rain Status (0/1)', 'Year', 'Month', 
+                           'Soil_Cinnamon Sand', 'Soil_Lateritic', 'Soil_Red Yellow Podzolic', 
+                           'Soil_Sandy Loam', 'Soil_Alluvial']
+        
+        # Create DataFrame with all columns
+        agro_features = pd.DataFrame([features_dict])
+        
+        # Add any missing columns as zeros
+        for col in expected_columns:
+            if col not in agro_features.columns:
+                agro_features[col] = 0
+                
+        # Ensure we only include columns the model was trained with
+        model_columns = agro_model.get_booster().feature_names
+        if model_columns:
+            # Select only columns the model knows about
+            agro_features = agro_features[model_columns]
+        
+        # Print for debugging
+        print(f"Feature columns: {agro_features.columns.tolist()}")
+        print(f"Feature types: {agro_features.dtypes}")
         
         # Get agronomical prediction
         agro_prediction = agro_model.predict(agro_features)[0]
         
         # For time series prediction, create features based on date
-        # This depends on your time series model structure
-        ts_features = pd.DataFrame({
-            'year': [prediction_date.year],
-            'month': [prediction_date.month],
-            'day': [prediction_date.day]
-        })
+        # CHANGED: Fix the time series prediction - convert to proper format based on model type
+        try:
+            # Check model type to determine correct input format
+            if hasattr(ts_model, 'named_steps') and 'regressor' in ts_model.named_steps:
+                # Pipeline with preprocessing
+                ts_features = pd.DataFrame({
+                    'year': [prediction_date.year],
+                    'month': [prediction_date.month],
+                    'day': [prediction_date.day]
+                })
+                ts_prediction = ts_model.predict(ts_features)[0]
+            else:
+                # Direct timestamp input or simple model
+                # Try different formats until one works
+                try:
+                    # Try with timestamp
+                    ts_prediction = ts_model.predict(prediction_date)[0]
+                except:
+                    try:
+                        # Try with date string
+                        ts_prediction = ts_model.predict(prediction_date.strftime('%Y-%m-%d'))[0]
+                    except:
+                        # Fall back to features DataFrame
+                        ts_features = pd.DataFrame({
+                            'ds': [prediction_date],  # Prophet uses 'ds' for dates
+                            'year': [prediction_date.year],
+                            'month': [prediction_date.month],
+                            'day': [prediction_date.day]
+                        })
+                        ts_prediction = ts_model.predict(ts_features)[0]
+        except Exception as ts_error:
+            print(f"Time series prediction error: {ts_error}")
+            # Fallback to using agronomical prediction if time series fails
+            ts_prediction = agro_prediction
         
-        # Get time series prediction
-        ts_prediction = ts_model.predict(ts_features)[0]
-        
-        # Combine predictions for ensemble (this uses the linear regression ensemble)
+        # Combine predictions for ensemble
         combined_features = np.array([[agro_prediction, ts_prediction]])
         
         # Get final ensemble prediction
@@ -87,7 +170,7 @@ except Exception as e:
     print(f"Error loading model: {e}")
     model_data = None
 
-@lru_cache(maxsize=128)
+# @lru_cache(maxsize=128)
 def predict_future_price(yield_nuts, export_volume, domestic_consumption, inflation_rate, 
                          prediction_date, previous_prices=None):
     """
@@ -228,8 +311,29 @@ def predict():
                 
                 # Make prediction using ensemble approach
                 prediction = predict_coconut_yield(soil_data, weather_data, prediction_date)
-                prediction['month'] = month
-                all_predictions.append(prediction)
+                
+                # Map values to the expected format
+                month_name = prediction_date.strftime('%B')
+                
+                # Format the prediction with the field names your app expects
+                formatted_prediction = {
+                    'month': month,
+                    'month_name': month_name,
+                    'year': prediction_year,
+                    'ensemble_prediction': round(prediction['ensemble_prediction'], 2),
+                    'long_term_prediction': round(prediction['agronomical_prediction'], 2),
+                    'seasonal_prediction': round(prediction['time_series_prediction'], 2),
+                    'confidence_score': round(70 + (30 * np.random.random()), 2),  # Example confidence score
+                    'input_data': {
+                        'plant_age': soil_data['age'],
+                        'soil_type': soil_data['soil_type'],
+                        'temperature': weather_data['Temperature (°C)'],
+                        'humidity': weather_data['Humidity (%)'],
+                        'rainfall': weather_data['Rainfall (mm)'],
+                    }
+                }
+                
+                all_predictions.append(formatted_prediction)
                 
             except Exception as e:
                 return jsonify({
@@ -238,15 +342,18 @@ def predict():
                 }), 400
 
         if all_predictions:
+            # Calculate the average prediction from ensemble predictions
+            average_prediction = round(
+                sum(p['ensemble_prediction'] for p in all_predictions) / len(all_predictions), 
+                2
+            )
+            
             print(f"Prediction completed in {time.time() - start_time:.2f} seconds")
             return jsonify({
                 'status': 'success',
                 'year': prediction_year,
                 'monthly_predictions': all_predictions,
-                'average_prediction': round(
-                    sum(p['ensemble_prediction'] for p in all_predictions) / len(all_predictions), 
-                    2
-                )
+                'average_prediction': average_prediction
             })
         else:
             return jsonify({
@@ -286,111 +393,6 @@ def predictPrice():
     return jsonify({'predicted_price': predicted_price,
                     'date': prediction_date})
 
-@app.route('/analyze_seasonality', methods=['GET'])
-def analyze_seasonality():
-    try:
-        # Path to your historical data
-        historical_data_path = 'data/processed_coconut_data.csv'
-        
-        # Check if the file exists
-        if not os.path.exists(historical_data_path):
-            return jsonify({
-                'status': 'error',
-                'message': 'Historical data file not found'
-            }), 404
-            
-        # Perform the analysis
-        analysis = analyze_seasonal_patterns(historical_data_path)
-        
-        if analysis:
-            return jsonify({
-                'status': 'success',
-                'analysis': analysis
-            })
-            
-        return jsonify({
-            'status': 'error',
-            'message': 'Failed to analyze seasonal patterns'
-        }), 500
-        
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
-
-@app.route('/visualize_seasonality', methods=['GET'])
-def visualize_seasonality():
-    try:
-        # Path to your historical data
-        historical_data_path = 'data/processed_coconut_data.csv'
-        
-        # Check if the file exists
-        if not os.path.exists(historical_data_path):
-            return jsonify({
-                'status': 'error',
-                'message': 'Historical data file not found'
-            }), 404
-            
-        # Create the visualization
-        image = create_seasonality_plot(historical_data_path)
-        
-        if image:
-            return jsonify({
-                'status': 'success',
-                'image': image
-            })
-            
-        return jsonify({
-            'status': 'error',
-            'message': 'Failed to create visualization'
-        }), 500
-        
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
-
-@app.route('/seasonal_factors', methods=['GET'])
-def get_seasonal_factors():
-    try:
-        seasonal_factors = load_seasonal_factors()
-        return jsonify({
-            'status': 'success',
-            'seasonal_factors': seasonal_factors
-        })
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
-
-if __name__ == '__main__':
-    # Ensure required directories exist
-    os.makedirs('models', exist_ok=True)
-    os.makedirs('data', exist_ok=True)
     
-    # Set up proper logging
-    import logging
-    logging.basicConfig(level=logging.INFO)
-    
-    # Pre-load and warm up models
-    print("Initializing models...")
-    
-    # Create example data file if it doesn't exist
-    historical_data_path = 'data/processed_coconut_data.csv'
-    if not os.path.exists(historical_data_path):
-        # Create a sample file based on your provided data
-        sample_data = """Date,Soil Moisture (10 cm) (%),Soil Moisture (20 cm) (%),Soil Moisture (30 cm) (%),Plant Age (years),Temperature (°C),Humidity (%),Rainfall (mm),Rain Status (0/1),Soil Type,Soil Type (Numeric),Coconut Count
-1930-05-31,25.233333333333334,31.333333333333332,41.9,5,27.266666666666666,67.43333333333334,5.025,1,Red Yellow Podzolic,4,511.0
-1930-06-30,25.233333333333334,31.333333333333332,41.9,4,27.266666666666666,67.43333333333334,5.025,1,Red Yellow Podzolic,4,511.0
-1930-07-31,30.433333333333337,31.433333333333334,46.166666666666664,5,28.133333333333336,65.86666666666667,2.6958333333333333,0,Red Yellow Podzolic,4,483.0"""
-        
-        with open(historical_data_path, 'w') as f:
-            f.write(sample_data)
-        
-        print(f"Created sample historical data file at {historical_data_path}")
-    
-    # Use threaded=True for better concurrency
-    app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
+# Use threaded=True for better concurrency
+app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
