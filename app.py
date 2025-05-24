@@ -56,18 +56,24 @@ def predict_coconut_yield(soil_data, weather_data, prediction_date):
             else:
                 print(f"Warning: Unknown soil type '{soil_type}'. Using Red Yellow Podzolic as default.")
                 soil_type_columns['Soil_Red Yellow Podzolic'] = 1
-        elif isinstance(soil_type, (int, float)):
-            # Convert numeric soil type to string name for one-hot encoding
+        elif isinstance(soil_type, (int, float)) or (isinstance(soil_type, str) and soil_type.isdigit()):
+            # Convert to integer if it's a numeric string
+            soil_type_num = int(float(soil_type))
+            
+            # UPDATED: Convert numeric soil type to string name for one-hot encoding
+            # Using the mapping from the prompt
             soil_type_map_reverse = {
-                0: 'Red Yellow Podzolic',
-                1: 'Lateritic',
-                2: 'Cinnamon Sand',
-                3: 'Alluvial',
-                4: 'Sandy Loam'
+                1: 'Red Yellow Podzolic',
+                2: 'Lateritic',
+                3: 'Cinnamon Sand',
+                4: 'Alluvial',
+                5: 'Sandy Loam'
             }
-            soil_name = soil_type_map_reverse.get(int(soil_type), 'Red Yellow Podzolic')
+            
+            soil_name = soil_type_map_reverse.get(soil_type_num, 'Red Yellow Podzolic')
             column_name = f'Soil_{soil_name}'
             soil_type_columns[column_name] = 1
+            print(f"Converted numeric soil type {soil_type_num} to '{soil_name}'")
         
         # Prepare agronomical features with one-hot encoded soil types
         features_dict = {
@@ -102,9 +108,9 @@ def predict_coconut_yield(soil_data, weather_data, prediction_date):
             # Select only columns the model knows about
             agro_features = agro_features[model_columns]
         
-        # Print for debugging
-        print(f"Feature columns: {agro_features.columns.tolist()}")
-        print(f"Feature types: {agro_features.dtypes}")
+        # # Print for debugging
+        # print(f"Feature columns: {agro_features.columns.tolist()}")
+        # print(f"Feature types: {agro_features.dtypes}")
         
         # Get agronomical prediction
         agro_prediction = agro_model.predict(agro_features)[0]
